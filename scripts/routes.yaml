@@ -3,3 +3,11 @@ routes:
       path: /hello
       script: HelloWorld.roc
       binary: hello-world
+    - method: GET
+      path: /todo
+      script: TodoList.roc
+      binary: todo-list
+    - method: GET
+      path: /todo/{id}
+      script: TodoDetail.roc
+      binary: todo-detail

@@ -9,27 +9,37 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v2"
 )
 
 type Route struct {
-	Method string `yaml:"method"`
-	Path   string `yaml:"path"`
-	Script string `yaml:"script"`
-	Binary string `yaml:"binary"`
+	Method string            `yaml:"method"`
+	Path   string            `yaml:"path"`
+	Script string            `yaml:"script"`
+	Binary string            `yaml:"binary"`
+	Params map[string]string `yaml:"-"`
 }
 
 type Routes struct {
 	Routes []Route `yaml:"routes"`
 }
 
+type ByPathLength []Route
+
+func (b ByPathLength) Len() int           { return len(b) }
+func (b ByPathLength) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
+func (b ByPathLength) Less(i, j int) bool { return len(b[i].Path) > len(b[j].Path) }
+
 const TIMEOUT_MILLISECONDS = 500
 
 var ErrInternalServerGeneric = errors.New("oops, something went wrong")
 
 func main() {
+
 	cgi_scripts_dir := os.Getenv("CGI_DIR")
 	if cgi_scripts_dir == "" {
 		log.Fatalf("ERROR: CGI_DIR environment variable not set\n")
@@ -43,8 +53,9 @@ func main() {
 		script_path := path.Join(cgi_scripts_dir, route.Script)
 		binary_path := path.Join(cgi_scripts_dir, route.Binary)
 
-		// Build the executable
-		cmd := exec.Command("roc", "build", "--optimize", script_path)
+		cmd := exec.Command("roc", "build", script_path)
+		// --optimize runs slow on Roc PG for now
+		// cmd := exec.Command("roc", "build", "--optimize", script_path)
 		err := cmd.Run()
 		if err != nil {
 			log.Fatalf("ERROR: Unable to build %s: %s", script_path, err.Error())
@@ -65,7 +76,7 @@ func main() {
 
 		elapsed := time.Since(start)
 
-		log.Printf("%s %s %d µs\n", r.Method, r.RequestURI, elapsed.Microseconds())
+		log.Printf("%s %s %d ms\n", r.Method, r.RequestURI, elapsed.Milliseconds())
 	})
 
 	log.Printf("INFO: Listening on port 8080\n")
@@ -84,12 +95,16 @@ func readAndUnmarshalRoutes(routeFile string) Routes {
 		log.Fatalf("ERROR: Unable to decode YAML: %s", err.Error())
 	}
 
+	sort.Sort(ByPathLength(routes.Routes))
+
 	return routes
 }
 
 func findRoute(r *http.Request, routes Routes) *Route {
 	for _, route := range routes.Routes {
-		if r.Method == route.Method && r.URL.Path == route.Path {
+		params := parseURLParameters(r.URL.Path, route.Path)
+		if params != nil && r.Method == route.Method {
+			route.Params = params
 			return &route
 		}
 	}
@@ -104,13 +119,13 @@ func handleHTTPRequest(w http.ResponseWriter, r *http.Request, routes Routes, cg
 		return
 	}
 
-	statusCode, err := executeScript(w, r, route.Script, path.Join(cgi_scripts_dir, route.Binary))
+	statusCode, err := executeScript(w, r, *route, path.Join(cgi_scripts_dir, route.Binary))
 	if err != nil {
 		http.Error(w, err.Error(), statusCode)
 	}
 }
 
-func executeScript(w http.ResponseWriter, r *http.Request, script_name, binary_path string) (int, error) {
+func executeScript(w http.ResponseWriter, r *http.Request, route Route, binary_path string) (int, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), TIMEOUT_MILLISECONDS*time.Millisecond)
 	defer cancel()
@@ -127,7 +142,11 @@ func executeScript(w http.ResponseWriter, r *http.Request, script_name, binary_p
 		"REMOTE_ADDR=" + r.RemoteAddr,
 		"SERVER_PROTOCOL=" + r.Proto,
 		"SERVER_SOFTWARE=roc-cgi",
-		"SCRIPT_NAME=" + script_name,
+		"SCRIPT_NAME=" + route.Script,
+	}
+
+	for key, value := range route.Params {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 
 	done := make(chan error)
@@ -154,4 +173,26 @@ func executeScript(w http.ResponseWriter, r *http.Request, script_name, binary_p
 	}
 
 	return http.StatusOK, nil
+}
+
+func parseURLParameters(url, pattern string) map[string]string {
+	urlSegments := strings.Split(url, "/")
+	patternSegments := strings.Split(pattern, "/")
+
+	if len(urlSegments) != len(patternSegments) {
+		return nil
+	}
+
+	parameters := make(map[string]string)
+
+	for i, segment := range patternSegments {
+		if len(segment) > 2 && segment[0] == '{' && segment[len(segment)-1] == '}' {
+			paramName := segment[1 : len(segment)-1]
+			parameters[paramName] = urlSegments[i]
+		} else if segment != urlSegments[i] {
+			return nil
+		}
+	}
+
+	return parameters
 }

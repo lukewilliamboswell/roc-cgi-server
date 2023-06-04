@@ -1,0 +1,5 @@
+routes:
+    - method: GET
+      path: /
+      script: HelloWorld.roc
+      binary: hello-world

@@ -2,6 +2,7 @@ app "todo-detail"
     packages {
         pf: "https://github.com/agu-z/roc-basic-cli/releases/download/0.5.0/S8r4wytSGYKi-iMrjaRZxv2Hope_CX7dF6rMdciYja8.tar.gz",
         pg: "https://github.com/lukewilliamboswell/roc-package-explorations/releases/download/pg/t0RDJ33m-ZCs7QLL2OmttKNqhB026CRZl9XcAgQAdFc.tar.br",
+        html: "https://github.com/Hasnep/roc-html/releases/download/v0.1.0/BIQytwqKV_7C1cK1outBaik7Kn5EQpSE4mAAaH6g8Vw.tar.br",
     }
     imports [
         pf.Task.{ Task, await },
@@ -12,8 +13,8 @@ app "todo-detail"
         pg.Pg.Cmd,
         pg.Pg.Client,
         pg.Pg.Result,
-        Html.{ html, head, body, div, text, a, p, h5, hr,  h1, link, meta },
-        Html.Attributes.{ httpEquiv, content, href, style, lang, rel, crossorigin, integrity, class },
+        html.Html.{ html, head, body, div, text, a, h1, link, p, h5, hr, meta },
+        html.Attribute.{ httpEquiv, content, href, crossorigin, style, integrity, rel, lang, class },
     ]
     provides [main] to pf
 
@@ -23,7 +24,8 @@ task =
     todoId <- Env.var "id" |> Task.await
 
     # Connect to the database
-    client <- Pg.Client.withConnect {
+    client <- Pg.Client.withConnect 
+        {
             host: "localhost",
             port: 5432,
             user: "test",

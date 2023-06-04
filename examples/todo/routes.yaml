@@ -1,9 +1,5 @@
 routes:
     - method: GET
-      path: /hello
-      script: HelloWorld.roc
-      binary: hello-world
-    - method: GET
       path: /todo
       script: TodoList.roc
       binary: todo-list

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// Route is ...
 type Route struct {
 	Method string            `yaml:"method"`
 	Path   string            `yaml:"path"`
@@ -24,55 +26,70 @@ type Route struct {
 	Params map[string]string `yaml:"-"`
 }
 
+// Routes is a list of Routes.
 type Routes struct {
 	Routes []Route `yaml:"routes"`
 }
 
-type ByPathLength []Route
+type byPathLength []Route
 
-func (b ByPathLength) Len() int           { return len(b) }
-func (b ByPathLength) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
-func (b ByPathLength) Less(i, j int) bool { return len(b[i].Path) > len(b[j].Path) }
+func (b byPathLength) Len() int           { return len(b) }
+func (b byPathLength) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
+func (b byPathLength) Less(i, j int) bool { return len(b[i].Path) > len(b[j].Path) }
 
-const TIMEOUT_MILLISECONDS = 500
+const timeout = 500 * time.Millisecond
 
-var ErrInternalServerGeneric = errors.New("oops, something went wrong")
+var errInternalServerGeneric = errors.New("oops, something went wrong")
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("Error: %v\n", err)
+	}
+}
 
-	cgi_scripts_dir := os.Getenv("CGI_DIR")
-	if cgi_scripts_dir == "" {
-		log.Fatalf("ERROR: CGI_DIR environment variable not set\n")
+func run() error {
+	cgiScriptsDir := os.Getenv("CGI_DIR")
+	if cgiScriptsDir == "" {
+		return fmt.Errorf("CGI_DIR environment variable not set")
 	}
 
-	routes := readAndUnmarshalRoutes(cgi_scripts_dir + "/routes.yaml")
+	routes, err := readAndUnmarshalRoutes(cgiScriptsDir + "/routes.yaml")
+	if err != nil {
+		return fmt.Errorf("read and unmarshal routes: %w", err)
+	}
 
 	// Build each Roc script into an executable
 	for _, route := range routes.Routes {
+		scriptPath := path.Join(cgiScriptsDir, route.Script)
+		binaryPath := path.Join(cgiScriptsDir, route.Binary)
 
-		script_path := path.Join(cgi_scripts_dir, route.Script)
-		binary_path := path.Join(cgi_scripts_dir, route.Binary)
-
-		cmd := exec.Command("roc", "build", script_path)
+		cmd := exec.Command("roc", "build", scriptPath)
 		// --optimize runs slow on Roc PG for now
 		// cmd := exec.Command("roc", "build", "--optimize", script_path)
-		err := cmd.Run()
-		if err != nil {
-			log.Fatalf("ERROR: Unable to build %s: %s", script_path, err.Error())
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("unable to build %s: %w", scriptPath, err)
 		}
 
 		// Check that the executable exists with the expected name
-		if _, err := os.Stat(binary_path); os.IsNotExist(err) {
-			log.Fatalf("ERROR: Expected binary %s does not exist", binary_path)
+		if _, err := os.Stat(binaryPath); errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("expected binary %s does not exist", binaryPath)
 		}
-
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-
 		start := time.Now()
 
-		handleHTTPRequest(w, r, routes, cgi_scripts_dir)
+		if err := handleHTTPRequest(w, r, routes, cgiScriptsDir); err != nil {
+			statusCode := 500
+			var errStatusCode statusCodeError
+			if errors.As(err, &errStatusCode) {
+				statusCode = int(errStatusCode)
+			}
+
+			log.Printf("Error: %v", err)
+			w.WriteHeader(statusCode)
+			return
+		}
 
 		elapsed := time.Since(start)
 
@@ -80,57 +97,69 @@ func main() {
 	})
 
 	log.Printf("INFO: Listening on port 8080\n")
-	http.ListenAndServe(":8080", nil)
-}
-
-func readAndUnmarshalRoutes(routeFile string) Routes {
-	data, err := os.ReadFile(routeFile)
-	if err != nil {
-		log.Fatalf("ERROR: Unable to read file: %s", err.Error())
-	}
-
-	var routes Routes
-	err = yaml.Unmarshal(data, &routes)
-	if err != nil {
-		log.Fatalf("ERROR: Unable to decode YAML: %s", err.Error())
-	}
-
-	sort.Sort(ByPathLength(routes.Routes))
-
-	return routes
-}
-
-func findRoute(r *http.Request, routes Routes) *Route {
-	for _, route := range routes.Routes {
-		params := parseURLParameters(r.URL.Path, route.Path)
-		if params != nil && r.Method == route.Method {
-			route.Params = params
-			return &route
-		}
+	if err := http.ListenAndServe(":8080", nil); err != http.ErrServerClosed {
+		return fmt.Errorf("HTTP Server failed: %w", err)
 	}
 
 	return nil
 }
 
-func handleHTTPRequest(w http.ResponseWriter, r *http.Request, routes Routes, cgi_scripts_dir string) {
-	route := findRoute(r, routes)
-	if route == nil {
-		http.Error(w, "no script found for route", http.StatusBadRequest)
-		return
+func readAndUnmarshalRoutes(routeFile string) (Routes, error) {
+	data, err := os.ReadFile(routeFile)
+	if err != nil {
+		return Routes{}, fmt.Errorf("unable to read file: %w", err)
 	}
 
-	statusCode, err := executeScript(w, r, *route, path.Join(cgi_scripts_dir, route.Binary))
+	var routes Routes
+	err = yaml.Unmarshal(data, &routes)
 	if err != nil {
-		http.Error(w, err.Error(), statusCode)
+		return Routes{}, fmt.Errorf("unable to decode YAML: %w", err)
 	}
+
+	sort.Sort(byPathLength(routes.Routes))
+
+	return routes, nil
 }
 
-func executeScript(w http.ResponseWriter, r *http.Request, route Route, binary_path string) (int, error) {
+func findRoute(r *http.Request, routes Routes) (*Route, bool) {
+	for _, route := range routes.Routes {
+		params := parseURLParameters(r.URL.Path, route.Path)
+		if params != nil && r.Method == route.Method {
+			route.Params = params
+			return &route, true
+		}
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), TIMEOUT_MILLISECONDS*time.Millisecond)
+	return nil, false
+}
+
+func handleHTTPRequest(w http.ResponseWriter, r *http.Request, routes Routes, cgiScriptsDir string) error {
+	route, ok := findRoute(r, routes)
+	if !ok {
+		return errors.Join(
+			fmt.Errorf("no script found for route"),
+			statusCodeError(http.StatusBadRequest),
+		)
+	}
+
+	if err := executeScript(w, r, *route, path.Join(cgiScriptsDir, route.Binary)); err != nil {
+		return fmt.Errorf("execute script: %w", err)
+	}
+
+	return nil
+}
+
+type statusCodeError int
+
+func (err statusCodeError) Error() string {
+	return fmt.Sprintf("status code: %d", err)
+}
+
+func executeScript(w http.ResponseWriter, r *http.Request, route Route, binaryPath string) error {
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binary_path)
+	cmd := exec.CommandContext(ctx, binaryPath)
 	cmd.Stdin = r.Body
 	cmd.Stdout = w
 	cmd.Env = []string{
@@ -149,30 +178,22 @@ func executeScript(w http.ResponseWriter, r *http.Request, route Route, binary_p
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 
-	done := make(chan error)
-	go func() {
-		err := cmd.Run()
-		if err != nil {
-			done <- fmt.Errorf("ERROR: Unable to run command: %s", err.Error())
-		} else {
-			done <- nil
+	err := cmd.Run()
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return errors.Join(
+				fmt.Errorf("time out. Cancelling"),
+				statusCodeError(http.StatusRequestTimeout),
+			)
 		}
-	}()
 
-	select {
-	case <-ctx.Done():
-		if ctx.Err() == context.DeadlineExceeded {
-			log.Printf("Timed out. Cancelling...")
-			cmd.Process.Kill()
-		}
-	case err := <-done:
-		if err != nil {
-			log.Printf("ERROR: Command failed: %s", err)
-			return http.StatusRequestTimeout, fmt.Errorf("ERROR: Command failed: %s", err.Error())
-		}
+		return errors.Join(
+			fmt.Errorf("unable to run command: %w", err),
+			statusCodeError(500),
+		)
 	}
 
-	return http.StatusOK, nil
+	return nil
 }
 
 func parseURLParameters(url, pattern string) map[string]string {
@@ -183,13 +204,16 @@ func parseURLParameters(url, pattern string) map[string]string {
 		return nil
 	}
 
-	parameters := make(map[string]string)
+	parameters := make(map[string]string, len(patternSegments))
 
 	for i, segment := range patternSegments {
 		if len(segment) > 2 && segment[0] == '{' && segment[len(segment)-1] == '}' {
 			paramName := segment[1 : len(segment)-1]
 			parameters[paramName] = urlSegments[i]
-		} else if segment != urlSegments[i] {
+			continue
+		}
+
+		if segment != urlSegments[i] {
 			return nil
 		}
 	}

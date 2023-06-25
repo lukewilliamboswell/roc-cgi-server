@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// Route is ...
 type Route struct {
 	Method string            `yaml:"method"`
 	Path   string            `yaml:"path"`
@@ -24,55 +25,54 @@ type Route struct {
 	Params map[string]string `yaml:"-"`
 }
 
+// Routes is a list of Routes.
 type Routes struct {
 	Routes []Route `yaml:"routes"`
 }
 
-type ByPathLength []Route
+type byPathLength []Route
 
-func (b ByPathLength) Len() int           { return len(b) }
-func (b ByPathLength) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
-func (b ByPathLength) Less(i, j int) bool { return len(b[i].Path) > len(b[j].Path) }
+func (b byPathLength) Len() int           { return len(b) }
+func (b byPathLength) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
+func (b byPathLength) Less(i, j int) bool { return len(b[i].Path) > len(b[j].Path) }
 
-const TIMEOUT_MILLISECONDS = 500
+const timeoutMilliseconds = 500
 
-var ErrInternalServerGeneric = errors.New("oops, something went wrong")
+var errInternalServerGeneric = errors.New("oops, something went wrong")
 
 func main() {
-
-	cgi_scripts_dir := os.Getenv("CGI_DIR")
-	if cgi_scripts_dir == "" {
+	cgiScriptsDir := os.Getenv("CGI_DIR")
+	if cgiScriptsDir == "" {
 		log.Fatalf("ERROR: CGI_DIR environment variable not set\n")
 	}
 
-	routes := readAndUnmarshalRoutes(cgi_scripts_dir + "/routes.yaml")
+	routes := readAndUnmarshalRoutes(cgiScriptsDir + "/routes.yaml")
 
 	// Build each Roc script into an executable
 	for _, route := range routes.Routes {
 
-		script_path := path.Join(cgi_scripts_dir, route.Script)
-		binary_path := path.Join(cgi_scripts_dir, route.Binary)
+		scriptPath := path.Join(cgiScriptsDir, route.Script)
+		binaryPath := path.Join(cgiScriptsDir, route.Binary)
 
-		cmd := exec.Command("roc", "build", script_path)
+		cmd := exec.Command("roc", "build", scriptPath)
 		// --optimize runs slow on Roc PG for now
 		// cmd := exec.Command("roc", "build", "--optimize", script_path)
 		err := cmd.Run()
 		if err != nil {
-			log.Fatalf("ERROR: Unable to build %s: %s", script_path, err.Error())
+			log.Fatalf("ERROR: Unable to build %s: %s", scriptPath, err.Error())
 		}
 
 		// Check that the executable exists with the expected name
-		if _, err := os.Stat(binary_path); os.IsNotExist(err) {
-			log.Fatalf("ERROR: Expected binary %s does not exist", binary_path)
+		if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+			log.Fatalf("ERROR: Expected binary %s does not exist", binaryPath)
 		}
 
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-
 		start := time.Now()
 
-		handleHTTPRequest(w, r, routes, cgi_scripts_dir)
+		handleHTTPRequest(w, r, routes, cgiScriptsDir)
 
 		elapsed := time.Since(start)
 
@@ -95,7 +95,7 @@ func readAndUnmarshalRoutes(routeFile string) Routes {
 		log.Fatalf("ERROR: Unable to decode YAML: %s", err.Error())
 	}
 
-	sort.Sort(ByPathLength(routes.Routes))
+	sort.Sort(byPathLength(routes.Routes))
 
 	return routes
 }
@@ -112,25 +112,24 @@ func findRoute(r *http.Request, routes Routes) *Route {
 	return nil
 }
 
-func handleHTTPRequest(w http.ResponseWriter, r *http.Request, routes Routes, cgi_scripts_dir string) {
+func handleHTTPRequest(w http.ResponseWriter, r *http.Request, routes Routes, cgiScriptsDir string) {
 	route := findRoute(r, routes)
 	if route == nil {
 		http.Error(w, "no script found for route", http.StatusBadRequest)
 		return
 	}
 
-	statusCode, err := executeScript(w, r, *route, path.Join(cgi_scripts_dir, route.Binary))
+	statusCode, err := executeScript(w, r, *route, path.Join(cgiScriptsDir, route.Binary))
 	if err != nil {
 		http.Error(w, err.Error(), statusCode)
 	}
 }
 
-func executeScript(w http.ResponseWriter, r *http.Request, route Route, binary_path string) (int, error) {
-
-	ctx, cancel := context.WithTimeout(context.Background(), TIMEOUT_MILLISECONDS*time.Millisecond)
+func executeScript(w http.ResponseWriter, r *http.Request, route Route, binaryPath string) (int, error) {
+	ctx, cancel := context.WithTimeout(r.Context(), timeoutMilliseconds*time.Millisecond)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binary_path)
+	cmd := exec.CommandContext(ctx, binaryPath)
 	cmd.Stdin = r.Body
 	cmd.Stdout = w
 	cmd.Env = []string{
@@ -149,27 +148,12 @@ func executeScript(w http.ResponseWriter, r *http.Request, route Route, binary_p
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 
-	done := make(chan error)
-	go func() {
-		err := cmd.Run()
-		if err != nil {
-			done <- fmt.Errorf("ERROR: Unable to run command: %s", err.Error())
-		} else {
-			done <- nil
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		if ctx.Err() == context.DeadlineExceeded {
+	err := cmd.Run()
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("Timed out. Cancelling...")
-			cmd.Process.Kill()
 		}
-	case err := <-done:
-		if err != nil {
-			log.Printf("ERROR: Command failed: %s", err)
-			return http.StatusRequestTimeout, fmt.Errorf("ERROR: Command failed: %s", err.Error())
-		}
+		return 500, fmt.Errorf("ERROR: Unable to run command: %w", err)
 	}
 
 	return http.StatusOK, nil

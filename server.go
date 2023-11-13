@@ -39,8 +39,6 @@ func (b byPathLength) Less(i, j int) bool { return len(b[i].Path) > len(b[j].Pat
 
 const timeout = 500 * time.Millisecond
 
-var errInternalServerGeneric = errors.New("oops, something went wrong")
-
 func main() {
 	if err := run(); err != nil {
 		log.Fatalf("Error: %v\n", err)
@@ -63,9 +61,7 @@ func run() error {
 		scriptPath := path.Join(cgiScriptsDir, route.Script)
 		binaryPath := path.Join(cgiScriptsDir, route.Binary)
 
-		cmd := exec.Command("roc", "build", scriptPath)
-		// --optimize runs slow on Roc PG for now
-		// cmd := exec.Command("roc", "build", "--optimize", script_path)
+		cmd := exec.Command("roc", "build", "--optimize", scriptPath)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("unable to build %s: %w", scriptPath, err)
 		}

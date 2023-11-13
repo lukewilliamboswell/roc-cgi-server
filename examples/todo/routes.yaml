@@ -1,9 +1,0 @@
-routes:
-    - method: GET
-      path: /todo
-      script: TodoList.roc
-      binary: todo-list
-    - method: GET
-      path: /todo/{id}
-      script: TodoDetail.roc
-      binary: todo-detail
